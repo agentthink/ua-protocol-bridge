@@ -1,0 +1,28 @@
+{
+  "profiles": {
+    "UAEdgeTranslator": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "launchUrl": "http://localhost:8081",
+      "environmentVariables": {
+        "OPCUA_USERNAME": "myUsername",
+        "OPCUA_PASSWORD": "myPassword",
+        "UACLURL": "https://uacloudlibrary.opcfoundation.org",
+        "UACLUsername": "",
+        "UACLPassword": ""
+      }
+    },
+    "Docker": {
+      "commandName": "Docker",
+      "launchBrowser": true,
+      "launchUrl": "http://localhost:8081",
+      "environmentVariables": {
+        "OPCUA_USERNAME": "myUsername",
+        "OPCUA_PASSWORD": "myPassword",
+        "UACLURL": "https://uacloudlibrary.opcfoundation.org",
+        "UACLUsername": "",
+        "UACLPassword": ""
+      }
+    }
+  }
+}

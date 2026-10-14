@@ -1,0 +1,67 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net10.0;net10.0-windows;net10.0-windows10.0.26100.0</TargetFrameworks>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>UAEdgeTranslator</AssemblyName>
+    <RootNamespace>Opc.Ua.Edge.Translator</RootNamespace>
+    <StartupObject></StartupObject>
+    <PackageId>UAEdgeTranslator</PackageId>
+    <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
+    <!-- Build context is the repo root because the Dockerfile copies the
+         repo-root MSBuild infrastructure (Directory.Packages.props,
+         Directory.Build.props, global.json) that NuGet restore needs under
+         central package management. -->
+    <DockerfileContext>..</DockerfileContext>
+    <DockerfileFile>Dockerfile</DockerfileFile>
+    <!-- Build number shown on the Overview page. CI passes /p:BuildNumber (the
+         GitHub run number); local builds default to 0. -->
+    <BuildNumber Condition="'$(BuildNumber)' == ''">0</BuildNumber>
+    <FileVersion>$(VersionPrefix).$(BuildNumber)</FileVersion>
+    <!-- F5 / "Docker" launch profile run arguments. We deliberately do NOT
+         pass the privileged flag here. Drivers that need raw hardware access
+         (LoRaWAN serial, Matter BLE, Modbus RTU) should add only the
+         specific device or capability flags they need at deploy time. See README. -->
+    <DockerfileRunArguments>-p 8081:8081 -p 4840:4840 -p 5000:5000 -p 5001:5001 -p 19520:19520 -p 19521:19521</DockerfileRunArguments>
+    <Platforms>x64;x86</Platforms>
+    <PlatformTarget Condition="'$(Platform)' == 'x86'">x86</PlatformTarget>
+    <PlatformTarget Condition="'$(Platform)' != 'x86'">x64</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="drivers\**" />
+    <Content Remove="drivers\**" />
+    <EmbeddedResource Remove="drivers\**" />
+    <None Remove="drivers\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Opc.Ua.WotCon.NodeSet2.xml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Ua.Edge.Translator.Config.xml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" />
+    <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" />
+    <PackageReference Include="OPCFoundation.NetStandard.Opc.Ua" />
+    <PackageReference Include="OPCFoundation.NetStandard.Opc.Ua.Client.ComplexTypes" />
+    <PackageReference Include="OPCFoundation.NetStandard.Opc.Ua.WotCon.Server" />
+    <PackageReference Include="OPCFoundation.NetStandard.Opc.Ua.WotCon.Bindings" />
+    <PackageReference Include="Serilog" />
+    <PackageReference Include="Serilog.Extensions.Logging" />
+    <PackageReference Include="Serilog.Sinks.Console" />
+    <PackageReference Include="Serilog.Sinks.File" />
+    <PackageReference Include="Sigstore" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="nodesets\" />
+    <Folder Include="settings\" />
+  </ItemGroup>
+
+</Project>

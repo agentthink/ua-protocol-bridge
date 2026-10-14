@@ -1,0 +1,391 @@
+namespace Opc.Ua.Edge.Translator.ProtocolDrivers
+{
+    using NModbus;
+    using NModbus.Serial;
+    using Opc.Ua;
+    using Opc.Ua.Edge.Translator.Interfaces;
+    using Opc.Ua.Edge.Translator.Models;
+    using Serilog;
+    using System;
+    using System.Collections.Generic;
+    using System.Threading;
+    using System.IO.Ports;
+    using System.Threading.Tasks;
+
+    /// <summary>
+    /// Modbus RTU (direct serial) implementation of IAsset using NModbus.
+    /// Connect(ipAddress, port): ipAddress = serial port name/path, port = baud rate.
+    /// </summary>
+    public class ModbusRTUAsset : IAsset
+    {
+        public enum FunctionCode : byte
+        {
+            ReadCoilStatus = 1,
+            ReadInputStatus = 2,
+            ReadHoldingRegisters = 3,
+            ReadInputRegisters = 4,
+            ForceSingleCoil = 5,
+            PresetSingleRegister = 6,
+            ReadExceptionStatus = 7,
+            ForceMultipleCoils = 15,
+            PresetMultipleRegisters = 16
+        }
+
+        private readonly object _lock = new object();
+
+        private SerialPort _serialPort;
+        private IModbusMaster _master;
+
+        // WoT action name -> the Modbus write tag it maps to (populated at asset creation).
+        private Dictionary<string, AssetTag> _actionTags;
+
+        private const int DefaultTimeoutMs = 10_000;
+
+        public bool IsConnected { get; private set; } = false;
+
+        private void ConnectCore(string ipAddress, int port)
+        {
+            lock (_lock)
+            {
+                DisconnectCore();
+
+                string comPort = string.Empty;
+                int baudRate = 0;
+                int dataBits = 0;
+                Parity parity = Parity.None;
+                StopBits stopBits = StopBits.None;
+                int unitId = 1;
+
+                // split ipAddress into port name, baud rate, data bits, parity, stop bits and unit ID, formatted as "COM3/19200/8/E/1/1"
+                string[] parts = ipAddress.Split('/');
+                if (parts.Length >= 8)
+                {
+                    comPort = parts[2];
+                    baudRate = int.Parse(parts[3]);
+                    dataBits = int.Parse(parts[4]);
+                    unitId = int.Parse(parts[7]);
+
+                    switch (parts[5].ToUpper())
+                    {
+                        case "N":
+                            parity = Parity.None;
+                            break;
+                        case "E":
+                            parity = Parity.Even;
+                            break;
+                        case "O":
+                            parity = Parity.Odd;
+                            break;
+                        case "M":
+                            parity = Parity.Mark;
+                            break;
+                        case "S":
+                            parity = Parity.Space;
+                            break;
+                        default:
+                            parity = Parity.None;
+                            break;
+                    }
+
+                    switch (parts[6])
+                    {
+                        case "1":
+                            stopBits = StopBits.One;
+                            break;
+                        case "1.5":
+                            stopBits = StopBits.OnePointFive;
+                            break;
+                        case "2":
+                            stopBits = StopBits.Two;
+                            break;
+                        default:
+                            stopBits = StopBits.None;
+                            break;
+                    }
+                }
+
+                // if running on Linux, append /dev/ to the com port name
+                if ((Environment.OSVersion.Platform == PlatformID.Unix) && !comPort.StartsWith("/dev/"))
+                {
+                    comPort = "/dev/" + comPort;
+                }
+
+                _serialPort = new SerialPort(comPort)
+                {
+                    BaudRate = baudRate,
+                    DataBits = dataBits,
+                    Parity = parity,
+                    StopBits = stopBits,
+                    ReadTimeout = DefaultTimeoutMs,
+                    WriteTimeout = DefaultTimeoutMs
+                };
+
+                _serialPort.Open();
+
+                var factory = new ModbusFactory();
+                _master = factory.CreateRtuMaster(_serialPort);
+
+                IsConnected = true;
+            }
+        }
+
+        private void DisconnectCore()
+        {
+            lock (_lock)
+            {
+                _master = null;
+
+                if (_serialPort != null)
+                {
+                    try { _serialPort.Close(); } catch { /* ignore */ }
+                    _serialPort.Dispose();
+                    _serialPort = null;
+                }
+
+                IsConnected = false;
+            }
+        }
+
+        public string GetRemoteEndpoint()
+        {
+            lock (_lock)
+            {
+                return _serialPort?.PortName ?? string.Empty;
+            }
+        }
+
+        private object ReadCore(AssetTag tag)
+        {
+            object value = null;
+
+            FunctionCode functionCode = tag.Entity switch
+            {
+                "HoldingRegister" => FunctionCode.ReadHoldingRegisters,
+                "InputRegister" => FunctionCode.ReadInputRegisters,
+                "Coil" => FunctionCode.ReadCoilStatus,
+                "DiscreteInput" => FunctionCode.ReadInputStatus,
+                _ => throw UnsupportedEntity(tag.Entity)
+            };
+
+            string[] addressParts = tag.Address.Split(['?', '&', '=']);
+
+            if ((addressParts.Length == 3) && (addressParts[1] == "quantity"))
+            {
+                ushort quantity = ushort.Parse(addressParts[2]);
+                byte[] tagBytes = Read(addressParts[0], tag.UnitID, functionCode.ToString(), quantity).GetAwaiter().GetResult();
+
+                if ((tagBytes != null) && (tagBytes.Length > 0))
+                {
+                    value = ModbusValueCodec.Decode(tag, tagBytes);
+                }
+            }
+
+            return value;
+        }
+
+        private static Exception UnsupportedEntity(string entity)
+        {
+            string message = $"Unsupported Modbus entity '{entity ?? "(null)"}'. Expected one of: HoldingRegister, InputRegister, Coil, DiscreteInput.";
+            Log.Logger.Error(message);
+            return new ArgumentException(message);
+        }
+
+        private static Exception ReadOnlyEntity(string entity)
+        {
+            string message = $"Modbus entity '{entity ?? "(null)"}' is read-only and cannot be written.";
+            Log.Logger.Error(message);
+            return new InvalidOperationException(message);
+        }
+
+        private void WriteCore(AssetTag tag, object value)
+        {
+            bool writeCoil = tag.Entity switch
+            {
+                "HoldingRegister" => false,
+                "Coil" => true,
+                "InputRegister" => throw ReadOnlyEntity(tag.Entity),
+                "DiscreteInput" => throw ReadOnlyEntity(tag.Entity),
+                _ => throw UnsupportedEntity(tag.Entity)
+            };
+
+            string[] addressParts = tag.Address.Split(['?', '&', '=']);
+            byte[] tagBytes = ModbusValueCodec.Encode(tag, value);
+
+            Write(addressParts[0], tag.UnitID, tagBytes, writeCoil, tag.IsBigEndian).GetAwaiter().GetResult();
+        }
+
+        /// <summary>
+        /// Registers the Modbus write tags that back this asset's WoT actions, keyed by
+        /// action name. Called once by the protocol driver at asset-creation time.
+        /// </summary>
+        public void SetActionTags(Dictionary<string, AssetTag> actionTags)
+        {
+            _actionTags = actionTags;
+        }
+
+        private string ExecuteActionCore(MethodState method, IList<object> inputArgs, ref IList<object> outputArgs)
+        {
+            string actionName = method?.BrowseName.Name;
+            if (string.IsNullOrEmpty(actionName) || (_actionTags == null) || !_actionTags.TryGetValue(actionName, out AssetTag tag))
+            {
+                return $"No Modbus form found for action '{actionName}'.";
+            }
+
+            if (string.IsNullOrEmpty(tag.Address))
+            {
+                return $"Modbus action '{actionName}' has no target address.";
+            }
+
+            try
+            {
+                // An action invocation is a Modbus write: reuse the property write path
+                // (entity dispatch, encoding, read-only rejection and function-code choice).
+                WriteCore(tag, ResolveActionValue(tag, inputArgs));
+                return "ok";
+            }
+            catch (Exception ex)
+            {
+                Log.Logger.Error(ex, "Failed to execute Modbus action '{Action}'.", actionName);
+                return ex.Message;
+            }
+        }
+
+        private static object ResolveActionValue(AssetTag tag, IList<object> inputArgs)
+        {
+            if ((inputArgs != null) && (inputArgs.Count > 0) && (inputArgs[0] != null))
+            {
+                return inputArgs[0];
+            }
+
+            // Nullary action (typical for a coil pulse / "button"): default a Coil to "true".
+            if (tag.Entity == "Coil")
+            {
+                return true;
+            }
+
+            throw new ArgumentException($"Action for entity '{tag.Entity}' requires an input value.");
+        }
+
+        private Task<byte[]> Read(string addressWithinAsset, byte unitID, string function, ushort count)
+        {
+            lock (_lock)
+            {
+                ushort startAddress = ushort.Parse(addressWithinAsset);
+
+                switch (function)
+                {
+                    case "ReadHoldingRegisters":
+                        {
+                            ushort[] regs = _master!.ReadHoldingRegisters(unitID, startAddress, count);
+                            return Task.FromResult(ModbusValueCodec.RegistersToWireBytes(regs));
+                        }
+
+                    case "ReadInputRegisters":
+                        {
+                            ushort[] regs = _master!.ReadInputRegisters(unitID, startAddress, count);
+                            return Task.FromResult(ModbusValueCodec.RegistersToWireBytes(regs));
+                        }
+
+                    case "ReadCoilStatus":
+                        {
+                            // Coil reads return bool[]; pack into Modbus response format bytes (LSB-first).
+                            bool[] coils = _master!.ReadCoils(unitID, startAddress, count);
+                            return Task.FromResult(ModbusValueCodec.CoilsToWireBytes(coils));
+                        }
+
+                    case "ReadInputStatus":
+                        {
+                            // Discrete input reads return bool[]; pack into Modbus response format bytes (LSB-first).
+                            bool[] inputs = _master!.ReadInputs(unitID, startAddress, count);
+                            return Task.FromResult(ModbusValueCodec.CoilsToWireBytes(inputs));
+                        }
+
+                    default:
+                        return Task.FromResult(Array.Empty<byte>());
+                }
+            }
+        }
+
+        private Task Write(string addressWithinAsset, byte unitID, byte[] values, bool singleBitOnly, bool valuesAreWireOrder)
+        {
+            lock (_lock)
+            {
+                ushort startAddress = ushort.Parse(addressWithinAsset);
+
+                if (singleBitOnly)
+                {
+                    bool set = values != null && values.Length > 0 && values[0] != 0;
+                    _master!.WriteSingleCoil(unitID, startAddress, set);
+                    return Task.CompletedTask;
+                }
+                else
+                {
+                    if (values == null) values = Array.Empty<byte>();
+
+                    if ((values.Length % 2) != 0)
+                    {
+                        throw new ArgumentException("Register write values must be an even number of bytes.");
+                    }
+
+                    ushort[] regs = new ushort[values.Length / 2];
+                    for (int i = 0; i < regs.Length; i++)
+                    {
+                        int offset = i * 2;
+                        regs[i] = valuesAreWireOrder
+                            ? (ushort)((values[offset] << 8) | values[offset + 1])
+                            : BitConverter.ToUInt16(values, offset);
+                    }
+
+                    if (regs.Length == 1)
+                    {
+                        // Single-register writes use WriteSingleRegister (FC 6) instead of
+                        // promoting the write to WriteMultipleRegisters (FC 16).
+                        _master!.WriteSingleRegister(unitID, startAddress, regs[0]);
+                    }
+                    else
+                    {
+                        _master!.WriteMultipleRegisters(unitID, startAddress, regs);
+                    }
+
+                    return Task.CompletedTask;
+                }
+            }
+        }
+
+        public Task ConnectAsync(string ipAddress, int port, CancellationToken cancellationToken = default)
+        {
+            ConnectCore(ipAddress, port);
+            return Task.CompletedTask;
+        }
+
+        public Task DisconnectAsync(CancellationToken cancellationToken = default)
+        {
+            DisconnectCore();
+            return Task.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            DisconnectCore();
+            return ValueTask.CompletedTask;
+        }
+
+        public Task<object> ReadAsync(AssetTag tag, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(ReadCore(tag));
+        }
+
+        public Task WriteAsync(AssetTag tag, object value, CancellationToken cancellationToken = default)
+        {
+            WriteCore(tag, value);
+            return Task.CompletedTask;
+        }
+
+        public Task<AssetActionResult> ExecuteActionAsync(MethodState method, IList<object> inputArgs, CancellationToken cancellationToken = default)
+        {
+            IList<object> outputArgs = null;
+            string status = ExecuteActionCore(method, inputArgs, ref outputArgs);
+            return Task.FromResult(AssetActionResult.FromOutputs(status, outputArgs));
+        }
+    }
+}

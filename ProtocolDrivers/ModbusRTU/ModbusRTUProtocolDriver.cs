@@ -1,0 +1,108 @@
+namespace Opc.Ua.Edge.Translator.ProtocolDrivers
+{
+    using Newtonsoft.Json;
+    using Opc.Ua.Edge.Translator.Interfaces;
+    using Opc.Ua.Edge.Translator.Models;
+    using System;
+    using System.Collections.Generic;
+    using System.Threading;
+    using System.Threading.Tasks;
+
+    public class ModbusRTUProtocolDriver: IProtocolDriver
+    {
+        public string Scheme => "modbus+rtu";
+
+        public string WoTBindingUri => "https://www.w3.org/2019/wot/modbus";
+
+        public IEnumerable<string> Discover()
+        {
+            // ModbusRTU does not support discovery
+            return new List<string>();
+        }
+
+        public ThingDescription BrowseAndGenerateTD(string assetName, string assetEndpoint)
+        {
+            return new ThingDescription()
+            {
+                Context = ["https://www.w3.org/2022/wot/td/v1.1"],
+                Id = ThingDescriptionId.FromAssetName(assetName),
+                SecurityDefinitions = new() { NosecSc = new NosecSc() { Scheme = "nosec" } },
+                Security = ["nosec_sc"],
+                Type = ["Thing"],
+                Name = assetName,
+                Base = assetEndpoint,
+                Title = assetName,
+                Properties = new Dictionary<string, Property>(),
+                Actions = new Dictionary<string, TDAction>()
+            };
+        }
+
+        public async Task<AssetConnection> CreateAndConnectAssetAsync(ThingDescription td, CancellationToken cancellationToken = default)
+        {
+            byte unitId = 1;
+            string[] address = td.Base.Split([':', '/']);
+            if ((address.Length != 9) || (address[0] != "modbus+rtu"))
+            {
+                throw new Exception("Expected Modbus RTU server address in the format modbus+rtu://comPort/baudRate/dataBits/parity/stopBits/unitId, e.g. modbus+rtu://ttyUSB1/9600/8/E/1/1");
+            }
+
+            unitId = byte.Parse(address[5]);
+
+            ModbusRTUAsset asset = new();
+
+            // check if we can reach the Modbus RTU asset
+            await asset.ConnectAsync(td.Base, 0).ConfigureAwait(false);
+
+            // Register any WoT actions so that invoking them issues a Modbus write.
+            asset.SetActionTags(BuildActionTags(td, unitId));
+
+            return new AssetConnection(asset, unitId);
+        }
+
+        private Dictionary<string, AssetTag> BuildActionTags(ThingDescription td, byte unitId)
+        {
+            Dictionary<string, AssetTag> actionTags = new();
+
+            if (td.Actions != null)
+            {
+                foreach (KeyValuePair<string, TDAction> action in td.Actions)
+                {
+                    if ((action.Value.Forms != null) && (action.Value.Forms.Length > 0) && (action.Value.Forms[0] != null))
+                    {
+                        actionTags[action.Key] = CreateTag(td, action.Value.Forms[0], td.Name, unitId, action.Key, null, null);
+                    }
+                }
+            }
+
+            return actionTags;
+        }
+
+        public AssetTag CreateTag(
+            ThingDescription td,
+            object form,
+            string assetId,
+            byte unitId,
+            string variableId,
+            string mappedUAExpandedNodeId,
+            string mappedUAFieldPath)
+        {
+            ModbusForm modbusForm = JsonConvert.DeserializeObject<ModbusForm>(form.ToString());
+
+            return new AssetTag()
+            {
+                Name = variableId,
+                Address = modbusForm.Href,
+                UnitID = unitId,
+                Type = modbusForm.ModbusType.ToString(),
+                PollingInterval = (int)modbusForm.PollingTime,
+                Entity = modbusForm.ModbusEntity.ToString(),
+                IsBigEndian = modbusForm.MostSignificantByte || modbusForm.MostSignificantWord,
+                SwapPerWord = modbusForm.MostSignificantWord,
+                Multiplier = modbusForm.Multiplier == null ? 1.0f : (float)modbusForm.Multiplier,
+                MappedUAExpandedNodeID = mappedUAExpandedNodeId,
+                MappedUAFieldPath = mappedUAFieldPath
+            };
+
+        }
+    }
+}

@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Platforms>x86;x64</Platforms>
+    <!-- Deliberately no explicit <PlatformTarget>. This driver wraps a 32-bit
+         COM/DCOM OPC Classic stack, but that is a *runtime* concern: it is
+         satisfied by publishing with -r win-x86 (see driver-pack.yml), which
+         makes the SDK infer PlatformTarget=x86 anyway. Hard-coding
+         PlatformTarget=x86 here additionally forced the *compile* to be
+         architecture-specific, which makes CSC raise CS8012 whenever the
+         referenced UAEdgeTranslator assembly is not also x86. That happens in
+         solution builds, because MSBuild's AssignProjectConfiguration overwrites
+         the SetPlatform metadata below with the solution's own project
+         configuration mapping (which maps UAServer to x64). Leaving the default
+         (AnyCPU/MSIL) lets this project reference UAServer at any architecture. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="TitaniumAS.Opc.Client.NetCore" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\UAServer\UAEdgeTranslator.csproj">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+      <SetTargetFramework>TargetFramework=net10.0-windows</SetTargetFramework>
+      <!-- OPCDA wraps a 32-bit DCOM/COM OPC Classic stack and is therefore
+           PlatformTarget=x86. The C# compiler emits CS8012 if it sees an
+           x64-marked reference from an x86-marked project, so force the inner
+           UAServer build to also produce an x86 assembly. UAServer's csproj
+           already declares <Platforms>x64;x86</Platforms> and conditionally
+           sets PlatformTarget=x86 when Platform=x86. -->
+      <SetPlatform>Platform=x86</SetPlatform>
+      <GlobalPropertiesToRemove>RuntimeIdentifier</GlobalPropertiesToRemove>
+    </ProjectReference>
+  </ItemGroup>
+
+</Project>
